@@ -1,0 +1,986 @@
+#!/bin/bash
+
+shopt -s extglob
+export LC_ALL=C
+export LANG=C
+
+cat >/dev/null <<__EOF__depends_on
+    * Bash
+    * gnu textutils
+    * Gnu AWK (gawk)
+__EOF__depends_on
+
+bogo::_help() {
+    cat <<"__EOF__"
+# bogoshible -- bogus Ansible clone
+
+```
+    # bogoshible do [target_dir]
+    # bogoshible do [target_dir] [opts...] [target_task...]
+    # bogoshible clean [target_dir]
+    # bogoshible lint [target_dir]
+```
+
+## command
+    * do
+        executes tasks.
+        Options:
+        * -d dir | --dir=dir
+            specify task directory
+        * -x task,task... | --exclude=task,task...
+            specify tasks to exclude
+        * --le=number
+            execute tasks which have priority less than and equal to specified number.
+            Task's priority is ditermined by its file name like: 00taskfile
+        * --ge=number
+            execute tasks which have priority greater than and equal to specified number.
+        * -t | --treat-no-prefix
+            treat tasks which have no priority number.
+            They will be forced to execute.
+        * -l logfilename | --log=logfilename
+            Specify log file name.
+            Default is 'LOG'
+
+        When [target_task] is specified, the task will be executed.
+        Other options cause no effect on it.
+
+        All tasks will be sorted alphabetically ( 0...9, a ... z )
+        and executed.
+
+    * clean
+        cleans up status files.
+        `bogoshible do` makes status files in $TARGET_DIR/.bogoshible/stats
+    
+    * lint
+        lints task files.
+        This function only checks Bash syntax.
+
+## Related files
+
+    * conf files
+        Name convention is *.conf.
+        Will be loaded for setting variables in advance of task files.
+    * task files
+        Name convention is *.task.
+        Write here provisioning scripts.
+        Files are load in order of `sort`.
+
+## Helper Functions
+    bogoshible has a sort of helper functions for provisioning.
+    Like:
+        * bogo::comment_out_lines
+        * bogo::comment_off_lines
+
+## Memo
+
+* This script is inspired much from bashible <https://github.com/mig1984/bashible>
+
+__EOF__
+}
+
+SIG_EXIT=0
+_DEL=$(printf '\x1')
+
+bogo::_br() {
+    echo -e '\n'
+}
+
+bogo::_indent() {
+    local number=$1
+    local i
+    for (( i=0;i<number;i++ ))
+    do
+        echo -n '  '
+    done
+}
+
+bogo::_em() {
+    echo -e "\033[4m\033[1m$*\033[0m" >&2
+}
+
+bogo::_info() {
+    echo -e "\n\033[1;37;44m INFO \033[0m $* \033[0m" >&2
+}
+
+bogo::_important() {
+    echo -e "\n\033[1;37;45m IMPORTANT \033[1;37;44m $* \033[0m" >&2
+}
+
+bogo::_fail() {
+    echo -e "\n\033[1;37;45m FAIL \033[1;37;41m $* \033[0m" >&2
+}
+
+bogo::_fatal() {
+    echo -e "\n\033[1;37;45m DIE \033[1;37;41m $* \033[0m" >&2
+}
+
+bogo::_error_quote() {
+    echo -e "\033[1;37;45m ERR \033[0m $*"
+}
+
+bogo::_abort() {
+    if test $# -ne 0; then
+        exit $1
+    fi
+    exit 1
+}
+
+bogo::_die() {
+    bogo::_fatal "$@"
+    bogo::_abort
+}
+
+bogo::_done() {
+  echo -e "\n\033[1;37;45m DONE \033[1;37;44m $* \033[0m\n" >&2
+}
+
+bogo::_LOG_DIRBASE() {
+    echo '.bogoshible'
+}
+
+bogo::_STATS_DIRBASE() {
+    echo "$(bogo::_LOG_DIRBASE)/stats"
+}
+
+bogo::_make_logdir() {
+    if [[ ! -d $(bogo::_LOG_DIRBASE) ]]; then
+        mkdir $(bogo::_LOG_DIRBASE) \
+            || bogo::_die "Cannot make directory: $(bogo::_LOG_DIRBASE)"
+    fi
+}
+
+bogo::_make_statsdir() {
+    if [[ ! -d $(bogo::_STATS_DIRBASE) ]]; then
+        mkdir $(bogo::_STATS_DIRBASE) \
+            || bogo::_die "Cannot make directory: $(bogo::_STATS_DIRBASE)"
+    fi
+}
+
+bogo::_get_stat() {
+    local task_name="$1"
+    local task_file="$(bogo::_STATS_DIRBASE)/$task_name"
+    local stat
+    if [[ ! -r "$task_file" ]]; then
+        stat='000_notyet'
+    else
+        stat=$(cat "$task_file")
+    fi
+    echo "$stat"
+}
+
+bogo::_save_stat() {
+    local task_name="$1"
+    local stat="$2"
+    echo "$stat" > "$(bogo::_STATS_DIRBASE)/$task_name" \
+        || bogo::_die "Cannot save stat: $(bogo::_STATS_DIRBASE)/$task_name"
+}
+
+bogo::_filename_to_taskname() {
+    local file_name="$@"
+    local task_name=${file_name%.task}
+    task_name=${task_name##+([0-9_-])}
+    echo "$task_name"
+}
+
+bogo::_if_arg_is_null() {
+    if [[ -z "$*" ]] || [[ "$*" =~ ^-+ ]]; then
+        return 1
+    fi
+}
+
+## helper:
+# bogo::comment_out_lines 'regex' filepath
+bogo::comment_out_lines() {
+    local match=$1
+    local path=$2
+    if [[ ${#match} -eq 0 ]]; then
+        bogo::_die "${FUNCNAME[0]}: empty regexp is not allowed"
+    fi
+    if [[ ! -f "$path" ]]; then
+        bogo::_die "${FUNCNAME[0]}: file $path not found"
+    fi
+    if [[ ! -w "$path" ]]; then
+        bogo::_die "${FUNCNAME[0]}: file $path not writable"
+    fi
+    sed -i -r \
+        's'${_DEL}'^([^#]*'"$match"'.*)$'${_DEL}'#\1'${_DEL} \
+        "$path"
+}
+
+## helper:
+# bogo::comment_off_lines 'regex' filepath
+bogo::comment_off_lines() {
+    local match=$1
+    local path=$2
+    if [[ ${#match} -eq 0 ]]; then
+        bogo::_die "${FUNCNAME[0]}: empty regexp is not allowed"
+    fi
+    if [[ ! -f "$path" ]]; then
+        bogo::_die "${FUNCNAME[0]}: file $path not found"
+    fi
+    if [[ ! -w "$path" ]]; then
+        bogo::_die "${FUNCNAME[0]}: file $path not writable"
+    fi
+    sed -i -r \
+        's'${_DEL}'^(\s*)##*(\s*)('"$match"'.*)$'${_DEL}'\1\2\3'${_DEL} \
+        "$path"
+}
+
+
+bogo::_on_error_in_do__confs() {
+    status=$?
+    script=$0
+    line=$1
+    shift
+
+    bogo::_fail "An error occured in executing conf"
+    cat <<_EOF__on_error_in_do__confs
+[Detail]
+* Script Name: $conf
+* Status: $status
+* Occured Line Number: $line
+_EOF__on_error_in_do__confs
+    trap $SIG_EXIT ERR
+    if [[ ! -z "$old_dir" ]]; then
+        cd $old_dir
+    fi
+    bogo::_die "Conf aborted"
+}
+
+bogo::_on_error_in_do__tasks() {
+    status=$?
+    script=$0
+    line=$1
+    shift
+
+    bogo::_fail "An error occured in executing task"
+    cat <<_EOF__on_error_in_do
+[Detail]
+* Script Name: $task
+* Status: $status
+* Occured Line Number: $line
+_EOF__on_error_in_do
+    trap $SIG_EXIT ERR
+    
+    bogo::_save_stat "$task" "030_error"
+    if [[ ! -z "$old_dir" ]]; then
+        cd $old_dir
+    fi
+    bogo::_die "Task aborted"
+}
+
+bogo::_do() {
+
+    target_dir='./'
+    prefix_le=-1
+    prefix_ge=-1
+    do_only_speficed=1
+    includes=()
+    excludes=()
+    task_files=()
+
+    opts_len=$#
+    for ((i=0; i<$opts_len; i++))
+    do
+        OPT="$1"
+        shift
+        case $OPT in
+            -d | --dir=*)
+                option='dir'
+                value=''
+                if [[ ! $OPT =~ ^-- ]]; then
+                    bogo::_if_arg_is_null "$1" || bogo::_die "Option $option requires an argument"
+                    value=$1
+                    shift
+                else
+                    value=${OPT#*=}
+                fi
+                if [[ -z "$value" ]]; then
+                    bogo::_die "Option $OPT got null value?"
+                fi
+                if [[ ! -d "$value" ]]; then
+                    bogo::_die "directory $value not found"
+                fi
+                target_dir=$value
+                ;;
+            -x | --exclude=*)
+                option='exclude'
+                value=''
+                if [[ ! $OPT =~ ^-- ]]; then
+                    bogo::_if_arg_is_null "$1" || bogo::_die "Option $option requires an argument"
+                    value=$1
+                    shift
+                else
+                    value=${OPT#*=}
+                fi
+                if [[ -z "$value" ]]; then
+                    bogo::_die "Option $OPT got null value?"
+                fi
+                excludes+=( ${value//,/ } ) # , causes splitting
+                do_only_speficed=0
+                ;;
+            --le=*)
+                option='le'
+                value=''
+                if [[ ! $OPT =~ ^-- ]]; then
+                    bogo::_if_arg_is_null "$1" || bogo::_die "Option $option requires an argument"
+                    value=$1
+                    shift
+                else
+                    value=${OPT#*=}
+                fi
+                if [[ -z "$value" ]]; then
+                    bogo::_die "Option $OPT got null value?"
+                fi
+                if [[ ! "$value" -ge 0 ]]; then
+                    bogo::_die "Please specify number greater than and equal 0 ($value)"
+                fi
+                prefix_le="$value"
+                do_only_speficed=0
+                ;;
+            --ge=*)
+                option='ge'
+                value=''
+                if [[ ! $OPT =~ ^-- ]]; then
+                    bogo::_if_arg_is_null "$1" || bogo::_die "Option $option requires an argument"
+                    value=$1
+                    shift
+                else
+                    value=${OPT#*=}
+                fi
+                if [[ -z "$value" ]]; then
+                    bogo::_die "Option $OPT got null value?"
+                fi
+                if [[ ! "$value" -ge 0 ]]; then
+                    bogo::_die "Please specify number greater than and equal 0 ($value)"
+                fi
+                prefix_ge="$value"
+                do_only_speficed=0
+                ;;
+            -t | --treat-no-prefix)
+                option='treat-no-prefix'
+                value=''
+                opt_treat_no_prefix=1
+                ;;
+            -a | --add)
+                option='add'
+                value=''
+                opt_add=1
+                ;;
+            -l | --log)
+                option='log'
+                value=''
+                if [[ ! $OPT =~ ^-- ]]; then
+                    bogo::_if_arg_is_null "$1" || bogo::_die "Option $option requires an argument"
+                    value=$1
+                    shift
+                else
+                    value=${OPT#*=}
+                fi
+                if [[ -z "$value" ]]; then
+                    bogo::_die "Option $OPT got null value?"
+                fi
+                opt_log="$value"
+                ;;
+            -*)
+                bogo::_die "Unknown option specified: '$OPT'"
+                ;;
+            '')
+                ;;
+            *)
+                includes+=( ${OPT//,/ } ) # , causes splitting
+                shift
+                # bogo::_die "Unknown option specified: '$OPT'"
+                ;;
+        esac
+    done
+
+    len=${#includes[@]}
+    for (( i=0;i<len;i++ ))
+    do
+        v=${includes[$i]}
+        if [[ ! $v =~ .task$ ]]; then
+            v=$v.task
+        fi
+        includes[$i]=$v
+    done
+
+    len=${#excludes[@]}
+    for (( i=0;i<len;i++ ))
+    do
+        v=${excludes[$i]}
+        if [[ ! $v =~ .task$ ]]; then
+            v=$v.task
+        fi
+        excludes[$i]=$v
+    done
+
+    raw_tasks+=( \
+        $(
+            cd $target_dir
+            \ls *.task 2>/dev/null
+        )
+    )
+    result_tasks=()
+    len_raw=${#raw_tasks[@]}
+    len_exc=${#excludes[@]}
+    for(( i=0;i<len_raw;i++ ))
+    do
+        task=${raw_tasks[$i]}
+        # Exclude
+        for(( j=0;j<len_exc;j++ ))
+        do
+            exc=${excludes[$j]}
+            if [[ $task == $exc ]]; then
+                task=''
+                break
+            fi
+        done
+        # Prefix number check
+        if [[ $opt_treat_no_prefix -ne 0 ]] && [[ $task != [0-9]* ]]; then
+            :
+        else
+            pref=${task%%[^0-9]*}
+            if [[ $prefix_le -ne -1 ]] && [[ ! $pref -le $prefix_le ]]; then
+                task=''
+            fi
+            if [[ $prefix_ge -ne -1 ]] && [[ ! $pref -ge $prefix_ge ]]; then
+                task=''
+            fi
+        fi
+        # push
+        if [[ $task != '' ]]; then
+            result_tasks+=($task)
+        fi
+    done
+
+    if [[ $opt_add -eq 1 ]] || [[ ${#includes[@]} -lt 1 ]]; then
+        result_tasks+=(${includes[@]})
+    else
+        result_tasks=(${includes[@]})
+    fi
+
+    sorted_uniq_tasks=(
+        $(
+            IFS=$'\n'
+            echo "${result_tasks[*]}" \
+                | \sort -u
+        )
+    )
+    tasks=("${sorted_uniq_tasks[@]}")
+
+    if [[ ${#tasks[@]} -eq 0 ]]; then
+        bogo::_die 'No task specified'
+    fi
+
+    confs=( \
+        $(
+            cd $target_dir
+            \ls *.conf 2>/dev/null \
+                | sort
+        )
+    )
+
+    bogo::_info "Found confs. & tasks:"
+    if [[ ${#confs[@]} -gt 0 ]]; then
+        echo "  Found ${#confs[@]} confs."
+        echo -n '    '
+        echo "${confs[*]}" | sed -e 's|\s\s*|, |g;'
+    fi
+    echo "  Found ${#tasks[@]} tasks."
+    echo -n '    '
+    echo "${tasks[*]}" | sed -e 's|\s\s*|, |g;'
+
+    bogo::_br
+
+    cat >/dev/null <<_EOF_rem
+        + $target_dir
+        L-+ bogo::_LOG_DIRBASE() :: .bogoshible/
+          L-+ bogo::_STATS_DIRBASE() :: stats/
+            L-+ stat file :: task_name
+                [000_notyet]
+                010_running
+                030_error
+                050_done
+          L-+ 
+_EOF_rem
+
+    old_dir=$(pwd)
+        cd $target_dir
+
+        # logging
+        LOG="${opt_log:-LOG}"
+        if \
+            [[ -z "$LOG" ]] \
+            || ! touch "$LOG" \
+            || [[ ! -w "$LOG" ]]; then
+            bogo::_die "Cannot write log file: $LOG"
+        fi
+        exec 1> >(
+            # while read -r line;
+            # do
+            #     echo -n "[$(date +"%Y-%m-%d %H:%M:%S")] "
+            #     echo "${line}"
+            # done \
+            gawk '
+                {
+                    print strftime("[%Y/%m/%d %H:%M:%S] ") $0;
+                    fflush(); # for unbuffered output
+                }
+            ' \
+            | tee $LOG
+        ) 2>&1
+
+        bogo::_info 'Loading confs.'
+        for conf in "${confs[@]}"
+        do
+            bogo::_indent 1
+                echo "- $conf"
+            set -e
+            trap \
+                'bogo::_on_error_in_do__confs $LINENO "$@"' \
+                $SIG_EXIT ERR
+            set -v
+                source $conf
+            set +v
+            trap $SIG_EXIT ERR
+            set +e
+        done
+
+        bogo::_make_logdir
+        bogo::_make_statsdir
+
+        bogo::_info 'Starting tasks...'
+        for task in "${tasks[@]}"
+        do
+            task_name=$(bogo::_filename_to_taskname "$task")
+            bogo::_important "$task_name"
+            bogo::_indent 1
+                echo "[taskfile: $task]"
+
+            stat=$(bogo::_get_stat "$task")
+            stat_value=${stat%%_*}
+            stat_value=${stat_value##+(0)}
+
+            if [[ $stat_value -ge 50 ]]; then
+                bogo::_indent 1
+                bogo::_em "This task already done. Skipped..."
+                bogo::_br
+                continue
+            fi
+
+            bogo::_br
+
+            # source $task
+            #   v: means verboselly echo command line
+            bogo::_save_stat "$task" "010_running"
+                set -e # strict error
+                trap \
+                    'bogo::_on_error_in_do__tasks $LINENO "$@"' \
+                    $SIG_EXIT ERR
+                set -v
+                source $task
+                set +v
+                trap $SIG_EXIT ERR
+                set +e
+            bogo::_save_stat "$task" "050_done"
+
+        done
+    cd $old_dir
+
+    bogo::_br
+    bogo::_done 'All tasks done.'
+
+} # bogo::_do()
+
+bogo::_clean() {
+    target_dir='./'
+
+    opts_len=$#
+    for ((i=0; i<$opts_len; i++))
+    do
+        OPT="$1"
+        shift
+        case $OPT in
+            -d | --dir=*)
+                option='dir'
+                value=''
+                if [[ ! $OPT =~ ^-- ]]; then
+                    bogo::_if_arg_is_null "$1" || bogo::_die "Option $option requires an argument"
+                    value=$1
+                    shift
+                else
+                    value=${OPT#*=}
+                fi
+                if [[ -z "$value" ]]; then
+                    bogo::_die "Option $OPT got null value?"
+                fi
+                if [[ ! -d "$value" ]]; then
+                    bogo::_die "directory $value not found"
+                fi
+                target_dir=$value
+                ;;
+            -*)
+                bogo::_die "Unknown option specified: '$OPT'"
+                ;;
+            '')
+                ;;
+            *)
+                # includes+=( ${OPT//,/ } ) # , causes splitting
+                # shift
+                bogo::_die "Unknown action specified: '$OPT'"
+                ;;
+        esac
+    done
+
+    bogo::_info "Started cleaning"
+    bogo::_indent 1
+        echo "Target directory: $target_dir"
+
+    _cleaning_done=$( cat <<__EOF___cleaning_done
+        bogo::_done "Cleaning"
+        exit
+__EOF___cleaning_done
+)
+
+    if [[ ! -d $target_dir/$(bogo::_LOG_DIRBASE) ]]; then
+        bogo::_indent 1
+            echo "No log directory. No needs to clean."
+        eval "$_cleaning_done"
+    fi
+
+    if [[ ! -d $target_dir/$(bogo::_STATS_DIRBASE) ]]; then
+        bogo::_indent 1
+            echo "No stats directory. No needs to clean."
+        eval "$_cleaning_done"
+    fi
+
+    stat_files=( $(\ls $target_dir/$(bogo::_STATS_DIRBASE)/* 2>/dev/null) )
+    if [[ ${#stat_files[@]} -gt 0 ]]; then
+        bogo::_indent 1
+            echo -n "Removing "
+        for stat_file in "${stat_files[@]}" ;
+        do
+            echo -n ${stat_file//*\/}" "
+            \rm -f $stat_file
+        done
+        echo -e "\n"
+    fi
+
+    eval "$_cleaning_done"
+
+} # bogo::_clean()
+
+bogo::_lint() {
+
+    target_dir='./'
+    prefix_le=-1
+    prefix_ge=-1
+    includes=()
+    excludes=()
+    task_files=()
+
+    opts_len=$#
+    for ((i=0; i<$opts_len; i++))
+    do
+        OPT="$1"
+        shift
+        case $OPT in
+            -d | --dir=*)
+                option='dir'
+                value=''
+                if [[ ! $OPT =~ ^-- ]]; then
+                    bogo::_if_arg_is_null "$1" || bogo::_die "Option $option requires an argument"
+                    value=$1
+                    shift
+                else
+                    value=${OPT#*=}
+                fi
+                if [[ -z "$value" ]]; then
+                    bogo::_die "Option $OPT got null value?"
+                fi
+                if [[ ! -d "$value" ]]; then
+                    bogo::_die "directory $value not found"
+                fi
+                target_dir=$value
+                ;;
+            -x | --exclude=*)
+                option='exclude'
+                value=''
+                if [[ ! $OPT =~ ^-- ]]; then
+                    bogo::_if_arg_is_null "$1" || bogo::_die "Option $option requires an argument"
+                    value=$1
+                    shift
+                else
+                    value=${OPT#*=}
+                fi
+                if [[ -z "$value" ]]; then
+                    bogo::_die "Option $OPT got null value?"
+                fi
+                excludes+=( ${value//,/ } ) # , causes splitting
+                do_only_speficed=0
+                ;;
+            --le=*)
+                option='le'
+                value=''
+                if [[ ! $OPT =~ ^-- ]]; then
+                    bogo::_if_arg_is_null "$1" || bogo::_die "Option $option requires an argument"
+                    value=$1
+                    shift
+                else
+                    value=${OPT#*=}
+                fi
+                if [[ -z "$value" ]]; then
+                    bogo::_die "Option $OPT got null value?"
+                fi
+                if [[ ! "$value" -ge 0 ]]; then
+                    bogo::_die "Please specify number greater than and equal 0 ($value)"
+                fi
+                prefix_le="$value"
+                do_only_speficed=0
+                ;;
+            --ge=*)
+                option='ge'
+                value=''
+                if [[ ! $OPT =~ ^-- ]]; then
+                    bogo::_if_arg_is_null "$1" || bogo::_die "Option $option requires an argument"
+                    value=$1
+                    shift
+                else
+                    value=${OPT#*=}
+                fi
+                if [[ -z "$value" ]]; then
+                    bogo::_die "Option $OPT got null value?"
+                fi
+                if [[ ! "$value" -ge 0 ]]; then
+                    bogo::_die "Please specify number greater than and equal 0 ($value)"
+                fi
+                prefix_ge="$value"
+                do_only_speficed=0
+                ;;
+            -t | --treat-no-prefix)
+                option='treat-no-prefix'
+                value=''
+                opt_treat_no_prefix=1
+                ;;
+            -a | --add)
+                option='add'
+                value=''
+                opt_add=1
+                ;;
+            -*)
+                bogo::_die "Unknown option specified: '$OPT'"
+                ;;
+            '')
+                ;;
+            *)
+                includes+=( ${OPT//,/ } ) # , causes splitting
+                shift
+                ;;
+        esac
+    done
+
+    bogo::_info "Started linting"
+    bogo::_indent 1
+        echo "Target directory: $target_dir"
+
+    raw_tasks+=( \
+        $(
+            cd $target_dir
+            \ls *.task 2>/dev/null
+        )
+    )
+    result_tasks=()
+    len_raw=${#raw_tasks[@]}
+    len_exc=${#excludes[@]}
+    for(( i=0;i<len_raw;i++ ))
+    do
+        task=${raw_tasks[$i]}
+        # Exclude
+        for(( j=0;j<len_exc;j++ ))
+        do
+            exc=${excludes[$j]}
+            if [[ $task == $exc ]]; then
+                task=''
+                break
+            fi
+        done
+        # Prefix number check
+        if [[ $opt_treat_no_prefix -ne 0 ]] && [[ $task != [0-9]* ]]; then
+            :
+        else
+            pref=${task%%[^0-9]*}
+            if [[ $prefix_le -ne -1 ]] && [[ ! $pref -le $prefix_le ]]; then
+                task=''
+            fi
+            if [[ $prefix_ge -ne -1 ]] && [[ ! $pref -ge $prefix_ge ]]; then
+                task=''
+            fi
+        fi
+        # push
+        if [[ $task != '' ]]; then
+            result_tasks+=($task)
+        fi
+    done
+
+    if [[ $opt_add -eq 1 ]] || [[ ${#includes[@]} -lt 1 ]]; then
+        result_tasks+=(${includes[@]})
+    else
+        result_tasks=(${includes[@]})
+    fi
+
+    sorted_uniq_tasks=(
+        $(
+            IFS=$'\n'
+            echo "${result_tasks[*]}" \
+                | \sort -u
+        )
+    )
+    tasks=("${sorted_uniq_tasks[@]}")
+
+    if [[ ${#tasks[@]} -eq 0 ]]; then
+        bogo::_die 'No task specified'
+    fi
+
+    confs=( \
+        $(
+            cd $target_dir
+            \ls *.conf 2>/dev/null \
+                | sort
+        )
+    )
+
+    # each bash -n $*
+    old_dir=$(pwd)
+    cd $target_dir
+    for target in "${confs[@]}" "${tasks[@]}"
+    do
+        bogo::_indent 1
+            echo "- Target: $target"
+        bash -n $target 2>&1 \
+            | while read line;
+                do
+                    bogo::_indent 2
+                    bogo::_error_quote "$line"
+                done
+    done
+    cd $old_dir
+
+} # bogo::_lint
+
+bogo::_status() {
+    target_dir='./'
+
+    opts_len=$#
+    for ((i=0; i<$opts_len; i++))
+    do
+        OPT="$1"
+        shift
+        case $OPT in
+            -d | --dir=*)
+                option='dir'
+                value=''
+                if [[ ! $OPT =~ ^-- ]]; then
+                    bogo::_if_arg_is_null "$1" || bogo::_die "Option $option requires an argument"
+                    value=$1
+                    shift
+                else
+                    value=${OPT#*=}
+                fi
+                if [[ -z "$value" ]]; then
+                    bogo::_die "Option $OPT got null value?"
+                fi
+                if [[ ! -d "$value" ]]; then
+                    bogo::_die "directory $value not found"
+                fi
+                target_dir=$value
+                ;;
+            -*)
+                bogo::_die "Unknown option specified: '$OPT'"
+                ;;
+            '')
+                ;;
+            *)
+                # includes+=( ${OPT//,/ } ) # , causes splitting
+                # shift
+                bogo::_die "Unknown action specified: '$OPT'"
+                ;;
+        esac
+    done
+
+    bogo::_info "Examining status"
+    bogo::_indent 1
+        echo "Target directory: $target_dir"
+
+    _status_done=$( cat <<__EOF___status_done
+        bogo::_done "Examining status"
+        exit
+__EOF___status_done
+)
+
+    if [[ ! -d $target_dir/$(bogo::_LOG_DIRBASE) ]]; then
+        bogo::_indent 1
+            echo "No log directory."
+        eval "$_status_done"
+    fi
+
+    if [[ ! -d $target_dir/$(bogo::_STATS_DIRBASE) ]]; then
+        bogo::_indent 1
+            echo "No stats directory."
+        eval "$_status_done"
+    fi
+
+    stat_files=(
+        $(
+            \ls -1 $target_dir/$(bogo::_STATS_DIRBASE)/* 2>/dev/null \
+            | sort
+        )
+    )
+    if [[ ${#stat_files[@]} -lt 0 ]]; then
+        bogo::_die "No stats file."
+    fi
+    for stat_file in "${stat_files[@]}" ;
+    do
+        basename=${stat_file//*\/}
+        basename=${basename#.*}
+        cont=$(head -1 $stat_file)
+        conts=( ${cont//_/ } )
+        mnemonic=${conts[0]}
+        readable=${conts[1]}
+        bogo::_indent 2
+            echo "${basename} => ${readable^^} (${mnemonic})"
+    done
+
+    eval "$_status_done"
+
+} # bogo::_status
+
+bogo::_main() {
+    local command=$1
+    shift;
+    case "$command" in
+        do )
+            bogo::_do $@
+            ;;
+        clean )
+            bogo::_clean $@
+            ;;
+        status )
+            bogo::_status $@
+            ;;
+        lint )
+            bogo::_lint $@
+            ;;
+        help )
+            bogo::_help
+            bogo::_abort
+            ;;
+        * )
+            bogo::_fail 'no valid argument'
+            bogo::_help
+            bogo::_abort
+    esac
+} # bogo::_main()
+
+bogo::_main $@
+
