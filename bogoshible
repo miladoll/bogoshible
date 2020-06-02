@@ -4,12 +4,6 @@ shopt -s extglob
 export LC_ALL=C
 export LANG=C
 
-cat >/dev/null <<__EOF__depends_on
-    * Bash
-    * gnu textutils
-    * Gnu AWK (gawk)
-__EOF__depends_on
-
 bogo::_help() {
     cat <<"__EOF__"
 # bogoshible -- bogus Ansible clone
@@ -78,6 +72,29 @@ bogo::_help() {
 __EOF__
 }
 
+
+bogo::_which() {
+    command -v "$@" 1>/dev/null 2>&1
+    return $?
+}
+
+# dependency check
+cat >/dev/null <<__EOF__depends_on
+    * Bash
+    * gnu textutils
+    * Gnu AWK (gawk)
+__EOF__depends_on
+OS=''
+if \ls /etc/*-release 1>/dev/null 2>&1; then
+    OS=$(eval $(cat /etc/*-release) && echo $ID)
+fi
+
+if ! bogo::_which if; then
+    echo "no such"
+fi
+
+exit
+
 SIG_EXIT=0
 _DEL=$(printf '\x1')
 
@@ -131,7 +148,11 @@ bogo::_die() {
 }
 
 bogo::_done() {
-  echo -e "\n\033[1;37;45m DONE \033[1;37;44m $* \033[0m\n" >&2
+    echo -e "\n\033[1;37;45m DONE \033[1;37;44m $* \033[0m\n" >&2
+}
+
+bogo::_message() {
+    echo "[bogo] $*" >&2
 }
 
 bogo::_LOG_DIRBASE() {
@@ -226,6 +247,20 @@ bogo::comment_off_lines() {
         "$path"
 }
 
+bogo::make_system_group_if_not_exists() {
+    local group=$1
+    if grep -q "^$group:" /etc/group; then
+        bogo::_message "? Group '$group' already exists. Skipped"
+        return 1
+    fi
+    groupadd --system "$1"
+}
+
+bogo::make_sure_dir() {
+    local dir=$1
+    [[ ! -d "$dir" ]] \
+        && mkdir "$1"
+}
 
 bogo::_on_error_in_do__confs() {
     status=$?
