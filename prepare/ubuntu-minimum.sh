@@ -42,7 +42,7 @@ if [ "$#" -lt 1 ]; then
     exit 1
 fi
 
-git -c core.sshCommand="'ssh -i $key_file -F /dev/null'" "$@"
+git -c core.sshCommand="ssh -i $key_file -F /dev/null" "$@"
 
 if [ "${is_temp-}" -eq 1 ]; then
     \rm $key_file
