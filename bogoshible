@@ -89,11 +89,6 @@ if \ls /etc/*-release 1>/dev/null 2>&1; then
     OS=$(eval $(cat /etc/*-release) && echo $ID)
 fi
 
-if ! bogo::_which if; then
-    echo "no such"
-fi
-
-exit
 
 SIG_EXIT=0
 _DEL=$(printf '\x1')
@@ -251,15 +246,16 @@ bogo::make_system_group_if_not_exists() {
     local group=$1
     if grep -q "^$group:" /etc/group; then
         bogo::_message "? Group '$group' already exists. Skipped"
-        return 1
+        return
     fi
     groupadd --system "$1"
 }
 
 bogo::make_sure_dir() {
     local dir=$1
-    [[ ! -d "$dir" ]] \
-        && mkdir "$1"
+    if [[ ! -d "$dir" ]]; then
+        mkdir "$1"
+    fi
 }
 
 bogo::_on_error_in_do__confs() {
