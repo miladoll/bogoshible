@@ -10,7 +10,7 @@ apt -y install \
     sed \
     gawk \
     openssh-client \
-    git \
+    git
 
 wget https://raw.githubusercontent.com/miladoll/bogoshible/master/bogoshible
 chmod +x bogoshible
