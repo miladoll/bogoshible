@@ -2,9 +2,11 @@
 
 cd ~root
 
+apt -y update
+
 apt -y install \
     wget \
-    apt-utils \
+    apt \
     bash \
     coreutils \
     sed \
