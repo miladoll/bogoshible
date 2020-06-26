@@ -14,9 +14,13 @@ apt -y install \
     openssh-client \
     git
 
+temp_dir=`mktemp -d`
+cur_dir=`pwd`
+cd $temp_dir
 wget https://raw.githubusercontent.com/miladoll/bogoshible/master/bogoshible
 chmod +x bogoshible
 mv bogoshible /usr/local/bin/bogoshible
+cd $cur_dir
 
 cat > /usr/local/bin/git_with_key <<'_EOF_'
 #!/bin/sh
