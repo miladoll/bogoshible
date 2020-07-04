@@ -507,7 +507,7 @@ bogo::_do() {
     confs=( \
         $(
             cd $target_dir
-            \ls *.conf 2>/dev/null \
+            \ls conf.* *.conf 2>/dev/null \
                 | sort
         )
     )
