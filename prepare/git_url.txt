@@ -1,1 +1,2 @@
 https://github.com/miladoll/bogoshible.git
+https://raw.githubusercontent.com/miladoll/bogoshible/master/bogoshible
