@@ -601,7 +601,7 @@ _EOF_rem
             fi
 
             # task_file_shebang check
-            if ! head -3 $task | grep -q -r '^#\(SKIP\|IGNORE\|RETURN\|EXIT\|DISABLE\)'; then
+            if ! head -3 $task | grep -q -E '^#\(SKIP\|IGNORE\|RETURN\|EXIT\|DISABLE\)'; then
                 bogo::_indent 1
                 bogo::_em "Skipped by task file shebang directive."
                 bogo::_br
