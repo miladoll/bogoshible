@@ -600,6 +600,14 @@ _EOF_rem
                 continue
             fi
 
+            # task_file_shebang check
+            if head -3 $task | egrep -q -r '^#(SKIP|IGNORE|RETURN|EXIT)'; then
+                bogo::_indent 1
+                bogo::_em "Skipped by task file shebang directive."
+                bogo::_br
+                continue
+            fi
+
             bogo::_br
 
             # source $task
