@@ -426,6 +426,8 @@ bogo::_do() {
         esac
     done
 
+    working_dir=$(pwd)
+
     len=${#includes[@]}
     for (( i=0;i<len;i++ ))
     do
@@ -573,6 +575,9 @@ _EOF_rem
                 $SIG_EXIT ERR
             set -v
                 source $conf
+                if [[ "$working_dir" != $(pwd) ]]; then
+                    cd $working_dir
+                fi
             set +v
             trap $SIG_EXIT ERR
             set +e
@@ -623,6 +628,9 @@ _EOF_rem
                 set -v
                 source $task
                 set +v
+                if [[ "$working_dir" != $(pwd) ]]; then
+                    cd $working_dir
+                fi
                 trap $SIG_EXIT ERR
                 set +e
             bogo::_save_stat "$task" "050_done"
